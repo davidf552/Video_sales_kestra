@@ -1,0 +1,80 @@
+id: zoom_project
+namespace: video-sales
+
+tasks:
+  - id: dataset_download
+    type: io.kestra.plugin.scripts.python.Script
+    outputFiles: 
+      - "Video_Games_Sales_Cleaned.csv"
+    dependencies:
+      - kagglehub
+      - kagglehub[pandas-datasets]
+    script: |
+      import kagglehub
+      from kagglehub import KaggleDatasetAdapter
+
+      # Download latest version
+
+      df = kagglehub.dataset_load(
+          KaggleDatasetAdapter.PANDAS,
+          "bhushandivekar/video-game-sales-and-industry-data-1980-2024",
+          "Video_Games_Sales_Cleaned.csv",
+      )
+
+      #Change release_year to int from float to avoid issues with bigquery later on.
+      df['release_year'] = df['release_year'].astype(int)
+
+      #File to local storage
+      df.to_csv("Video_Games_Sales_Cleaned.csv", index=False)
+
+
+  - id: data_lake
+    type: io.kestra.plugin.gcp.gcs.Upload
+    serviceAccount: "{{ secret('GCP_SERVICE_ACCOUNT') }}"
+    from: "{{ outputs.dataset_download.outputFiles['Video_Games_Sales_Cleaned.csv'] }}"
+    to: gs://bruin-test-002/orders.csv
+
+  - id: warehouse
+    type: io.kestra.plugin.gcp.bigquery.LoadFromGcs
+    format: CSV
+    csvOptions:
+      fieldDelimiter: ","
+      skipLeadingRows: 1   
+    createDisposition: CREATE_IF_NEEDED
+    writeDisposition: WRITE_TRUNCATE
+    destinationTable: "video-490706.game_sales.Kestra_video"
+    autodetect: true
+    clusteringFields: 
+      - genre
+      - console
+    serviceAccount: "{{ secret('GCP_SERVICE_ACCOUNT') }}"
+    from: 
+      - gs://bruin-test-002/orders.csv
+
+  - id: distribution_table
+    type: io.kestra.plugin.gcp.bigquery.Query
+    createDisposition: CREATE_IF_NEEDED
+    destinationTable: video-490706.game_sales.Kestra_dist
+    writeDisposition: WRITE_TRUNCATE
+    serviceAccount: "{{ secret('GCP_SERVICE_ACCOUNT') }}"
+    sql: |
+
+        SELECT console, ROUND(SUM(total_sales), 2) AS year_sales, 
+        ROUND(SUM(total_sales) * 100.0 / SUM(SUM(total_sales)) OVER (), 2) AS pct_sales
+        FROM `video-490706.game_sales.Kestra_video`
+        GROUP BY console
+        ORDER BY year_sales DESC;
+
+  - id: year_table
+    type: io.kestra.plugin.gcp.bigquery.Query
+    createDisposition: CREATE_IF_NEEDED
+    destinationTable: video-490706.game_sales.Kestra_year
+    writeDisposition: WRITE_TRUNCATE
+    serviceAccount: "{{ secret('GCP_SERVICE_ACCOUNT') }}"
+    sql: |
+
+        SELECT release_year, ROUND(SUM(total_sales), 2) AS year_sales
+        FROM `video-490706.game_sales.Kestra_video`
+        GROUP BY release_year ORDER BY release_year;
+
+    
